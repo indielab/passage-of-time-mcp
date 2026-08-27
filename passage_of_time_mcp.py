@@ -622,12 +622,43 @@ async def health(request: Request) -> PlainTextResponse:
     return PlainTextResponse("OK")
 
 if __name__ == "__main__":
-    import asyncio
+    import uvicorn
+    from contextlib import asynccontextmanager
+    from starlette.applications import Starlette
+
     port = int(os.environ.get("PORT", 8000))
-    asyncio.run(
-        mcp.run_sse_async(
-            host="0.0.0.0",  # Changed from 127.0.0.1 to allow external connections
-            port=port,
-            log_level="debug"
-        )
+
+    # Serve BOTH MCP transports during the migration era: SSE is deprecated
+    # upstream but every existing connector was configured against /sse, so
+    # it must keep working while new clients point at streamable HTTP.
+    #   /mcp            — streamable HTTP (modern; use for new connectors)
+    #   /sse, /messages — legacy SSE (existing connectors keep working)
+    http_app = mcp.http_app(transport="streamable-http", path="/mcp")
+    sse_app = mcp.http_app(transport="sse", path="/sse")
+
+    @asynccontextmanager
+    async def dual_lifespan(app):
+        # Both sub-apps need their lifespans run (the streamable session
+        # manager in particular refuses requests without it).
+        async with http_app.lifespan(app):
+            async with sse_app.lifespan(app):
+                yield
+
+    app = Starlette(
+        routes=[*http_app.routes, *sse_app.routes],
+        lifespan=dual_lifespan,
     )
+
+    class PathNormalizer:
+        # The streamable mount answers at /mcp/ and 307-redirects bare
+        # /mcp; not every MCP client follows redirects, so rewrite the
+        # path in-process and serve both spellings directly.
+        def __init__(self, app):
+            self.app = app
+
+        async def __call__(self, scope, receive, send):
+            if scope.get("type") == "http" and scope.get("path") == "/mcp":
+                scope = dict(scope, path="/mcp/", raw_path=b"/mcp/")
+            await self.app(scope, receive, send)
+
+    uvicorn.run(PathNormalizer(app), host="0.0.0.0", port=port)
