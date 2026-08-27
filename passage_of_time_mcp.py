@@ -611,6 +611,16 @@ def format_duration(
     except Exception as e:
         return f"Error formatting duration: {str(e)}"
 
+from starlette.requests import Request
+from starlette.responses import PlainTextResponse
+
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> PlainTextResponse:
+    # Hosting health checks need a route that *completes*: /sse streams
+    # forever, so a checker pointed at it reads as a timeout even while the
+    # server is healthy (this silently killed the June 2025 Render deploys).
+    return PlainTextResponse("OK")
+
 if __name__ == "__main__":
     import asyncio
     port = int(os.environ.get("PORT", 8000))
